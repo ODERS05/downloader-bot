@@ -82,7 +82,7 @@ uploads up to **2000 MB**. Docker Compose starts it next to the bot, and the bot
 ## Project structure
 
 ```
-youtube-bot/
+downloader-bot/
 ├── bot/
 │   ├── __main__.py          # Entry point: builds the bot, wires everything together, starts polling
 │   ├── config.py            # Reads and validates settings from environment variables
@@ -143,8 +143,8 @@ curl -fsSL https://get.docker.com | sh
 ### 3. Download the bot and configure it
 
 ```bash
-git clone https://github.com/<your-username>/youtube-bot.git
-cd youtube-bot
+git clone https://github.com/<your-username>/downloader-bot.git
+cd downloader-bot
 cp .env.example .env
 nano .env        # fill in BOT_TOKEN, ALLOWED_USER_IDS, TELEGRAM_API_ID, TELEGRAM_API_HASH
 ```
