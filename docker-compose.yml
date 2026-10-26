@@ -1,0 +1,49 @@
+services:
+  # Telegram's official Bot API server, run locally. In local mode it lets the bot send
+  # files up to 2 GB instead of 50 MB. Needs TELEGRAM_API_ID / TELEGRAM_API_HASH from my.telegram.org.
+  telegram-bot-api:
+    image: aiogram/telegram-bot-api:10.3
+    restart: unless-stopped
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:?Set TELEGRAM_API_ID in .env}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:?Set TELEGRAM_API_HASH in .env}
+      TELEGRAM_LOCAL: "1"  # --local: required for the 2000 MB upload limit
+    volumes:
+      - telegram-bot-api-data:/var/lib/telegram-bot-api
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8081"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    # No "ports:" on purpose: only the bot container can reach it.
+
+  bot:
+    build: .
+    restart: unless-stopped
+    # Only what the bot needs. TELEGRAM_API_ID/HASH stay with the API server, so they are
+    # never visible to yt-dlp/ffmpeg, which handle content from the internet.
+    environment:
+      BOT_TOKEN: ${BOT_TOKEN:?Set BOT_TOKEN in .env}
+      ALLOWED_USER_IDS: ${ALLOWED_USER_IDS:?Set ALLOWED_USER_IDS in .env}
+      MAX_FILE_SIZE_MB: ${MAX_FILE_SIZE_MB:-}
+      MAX_CONCURRENT_DOWNLOADS: ${MAX_CONCURRENT_DOWNLOADS:-}
+      COOKIES_FILE: ${COOKIES_FILE:-}
+      YTDLP_AUTO_UPDATE: ${YTDLP_AUTO_UPDATE:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      TELEGRAM_API_URL: http://telegram-bot-api:8081
+      DOWNLOAD_DIR: /downloads
+    depends_on:
+      telegram-bot-api:
+        condition: service_healthy
+    volumes:
+      - downloads:/downloads   # temporary files, deleted after every download
+      - ./data:/app/data:ro    # put cookies.txt here if you need it
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  telegram-bot-api-data:
+  downloads:

@@ -1,0 +1,262 @@
+from pathlib import Path
+
+import pytest
+from yt_dlp.utils import DownloadError
+
+from bot.services import downloader as downloader_module
+from bot.services.downloader import Downloader, _format_options, _run_ytdlp, classify_error
+from bot.services.media import MediaError
+
+MAX_SIZE = 1000
+
+
+@pytest.fixture
+def downloader(tmp_path: Path) -> Downloader:
+    instance = Downloader(download_dir=tmp_path / "downloads", max_file_size=MAX_SIZE, max_concurrent=1)
+    instance.prepare()
+    return instance
+
+
+def fake_ytdlp(monkeypatch, info: dict, files: dict[str, int] | None = None):
+    """Replace the real yt-dlp call; optionally 'download' files of given sizes."""
+    calls = []
+
+    def run(options, url, *, download):
+        calls.append(options)
+        if download and files:
+            home = Path(options["paths"]["home"])
+            for name, size in files.items():
+                (home / name).write_bytes(b"x" * size)
+        return info
+
+    monkeypatch.setattr(downloader_module, "_run_ytdlp", run)
+    return calls
+
+
+@pytest.mark.parametrize(
+    ("message", "code"),
+    [
+        ("ERROR: [youtube] abc: Sign in to confirm you're not a bot", "error_blocked"),
+        ("HTTP Error 429: Too Many Requests", "error_blocked"),
+        ("ERROR: [youtube] abc: Private video. Sign in if you've been granted access", "error_restricted"),
+        ("Sign in to confirm your age", "error_restricted"),
+        ("ERROR: [vimeo] 1: The web client only works when logged-in. Use --cookies", "error_restricted"),
+        ("ERROR: Unsupported URL: https://example.com", "error_unsupported"),
+        ("ERROR: [youtube] abc: Video unavailable", "error_unsupported"),
+        ("ERROR: something exploded", "error_generic"),
+    ],
+)
+def test_classify_error(message, code):
+    assert classify_error(message) == code
+
+
+def test_prepare_cleans_only_leftover_job_folders(tmp_path):
+    leftover = tmp_path / "downloads" / "job-old" / "file.mp4"
+    leftover.parent.mkdir(parents=True)
+    leftover.write_bytes(b"x")
+    unrelated = tmp_path / "downloads" / "my-video.mp4"
+    unrelated.write_bytes(b"keep me")
+
+    Downloader(tmp_path / "downloads", MAX_SIZE, 1).prepare()
+
+    assert not leftover.parent.exists()
+    assert unrelated.exists()
+
+
+def test_each_job_gets_its_own_cookies_copy(tmp_path):
+    cookies = tmp_path / "cookies.txt"
+    cookies.write_text("# Netscape HTTP Cookie File\n")
+    instance = Downloader(tmp_path / "downloads", MAX_SIZE, 1, cookies_file=cookies)
+    instance.prepare()
+    first, second = tmp_path / "job-a", tmp_path / "job-b"
+    first.mkdir()
+    second.mkdir()
+
+    first_options = instance._base_options(first)
+    second_options = instance._base_options(second)
+
+    assert first_options["cookiefile"] == str(first / "cookies.txt")
+    assert second_options["cookiefile"] == str(second / "cookies.txt")
+    assert Path(first_options["cookiefile"]).read_text() == cookies.read_text()
+
+
+@pytest.mark.parametrize("make_unreadable", [lambda p: None, lambda p: p.mkdir()])
+def test_prepare_ignores_missing_or_unreadable_cookies(tmp_path, make_unreadable):
+    cookies = tmp_path / "cookies.txt"
+    make_unreadable(cookies)  # missing file, or a folder where the file should be
+    instance = Downloader(tmp_path / "downloads", MAX_SIZE, 1, cookies_file=cookies)
+
+    instance.prepare()
+
+    assert "cookiefile" not in instance._base_options(tmp_path)
+
+
+async def test_download_ignores_cookies_copy_when_finding_output(tmp_path, monkeypatch):
+    cookies = tmp_path / "cookies.txt"
+    cookies.write_text("x" * 5000)  # bigger than the "video"
+    instance = Downloader(tmp_path / "downloads", MAX_SIZE * 10, 1, cookies_file=cookies)
+    instance.prepare()
+
+    def run(options, url, *, download):
+        assert Path(options["cookiefile"]).exists()
+        (Path(options["paths"]["home"]) / "abc.mp4").write_bytes(b"v" * 100)
+        return {"title": "t"}
+
+    monkeypatch.setattr(downloader_module, "_run_ytdlp", run)
+
+    async with instance.download("https://youtu.be/abc", "best") as file:
+        assert file.path.name == "abc.mp4"
+
+
+async def test_probe_cleans_up_its_temp_folder(downloader, monkeypatch, tmp_path):
+    fake_ytdlp(monkeypatch, {"title": "x"})
+
+    await downloader.probe("https://youtu.be/abc")
+
+    assert list((tmp_path / "downloads").iterdir()) == []
+
+
+async def test_probe_builds_media_info(downloader, monkeypatch):
+    fake_ytdlp(
+        monkeypatch,
+        {
+            "webpage_url": "https://www.youtube.com/watch?v=abc",
+            "title": "Hello",
+            "duration": 60,
+            "channel": "Chan",
+            "formats": [{"vcodec": "avc1", "acodec": "none", "height": 720, "width": 1280, "filesize": 100}],
+        },
+    )
+
+    info = await downloader.probe("https://youtu.be/abc")
+
+    assert info.url == "https://www.youtube.com/watch?v=abc"
+    assert info.title == "Hello"
+    assert info.uploader == "Chan"
+    assert [q.label for q in info.qualities] == ["720p"]
+    assert info.audio_size == 1_440_000
+
+
+@pytest.mark.parametrize(
+    ("info", "code"),
+    [
+        ({"_type": "playlist"}, "playlist"),
+        ({"is_live": True}, "live"),
+        ({"live_status": "is_upcoming"}, "live"),
+    ],
+)
+async def test_probe_rejects_playlists_and_live(downloader, monkeypatch, info, code):
+    fake_ytdlp(monkeypatch, info)
+
+    with pytest.raises(MediaError) as err:
+        await downloader.probe("https://example.com/x")
+    assert err.value.code == code
+
+
+async def test_download_video_returns_file_and_cleans_up(downloader, monkeypatch):
+    calls = fake_ytdlp(
+        monkeypatch,
+        {"title": "Hello", "duration": 12.7, "width": 1280, "height": 720, "uploader": "Me"},
+        files={"abc.mp4": 500, "abc.f140.m4a.part": 900},
+    )
+
+    async with downloader.download("https://youtu.be/abc", "720") as file:
+        assert file.path.name == "abc.mp4"
+        assert file.kind == "video"
+        assert (file.duration, file.width, file.height, file.uploader) == (12, 1280, 720, "Me")
+        workdir = file.path.parent
+
+    assert not workdir.exists()
+    options = calls[0]
+    assert options["format"] == "bv*[height<=?720]+ba/b[height<=?720]"
+    assert options["merge_output_format"] == "mp4"
+    assert options["max_filesize"] == MAX_SIZE
+
+
+async def test_download_audio(downloader, monkeypatch):
+    calls = fake_ytdlp(
+        monkeypatch, {"title": "Song", "duration": None, "width": 1, "height": 1}, files={"abc.mp3": 100}
+    )
+
+    async with downloader.download("https://youtu.be/abc", "mp3") as file:
+        assert file.kind == "audio"
+        assert file.width is None and file.height is None and file.duration is None
+
+    assert calls[0]["postprocessors"][0]["preferredcodec"] == "mp3"
+
+
+async def test_download_skipped_for_size_raises_too_large(downloader, monkeypatch):
+    fake_ytdlp(monkeypatch, {"duration": 10, "requested_formats": [{"filesize": 800}, {"filesize": 700}]})
+
+    with pytest.raises(MediaError) as err:
+        async with downloader.download("https://youtu.be/abc", "best"):
+            pass
+    assert err.value.code == "too_large"
+    assert err.value.params["size"] == 1500
+
+
+async def test_download_unknown_size_reports_none(downloader, monkeypatch):
+    fake_ytdlp(monkeypatch, {"duration": 10, "requested_formats": [{"filesize": 800}, {}]})
+
+    with pytest.raises(MediaError) as err:
+        async with downloader.download("https://youtu.be/abc", "best"):
+            pass
+    assert err.value.params["size"] is None
+
+
+async def test_downloaded_file_over_limit_raises_too_large(downloader, monkeypatch):
+    fake_ytdlp(monkeypatch, {"title": "Big"}, files={"abc.mp4": MAX_SIZE + 1})
+
+    with pytest.raises(MediaError) as err:
+        async with downloader.download("https://youtu.be/abc", "best"):
+            pass
+    assert err.value.params["size"] == MAX_SIZE + 1
+
+
+def test_format_options_for_best():
+    options = _format_options("best")
+
+    assert options["format"] == "bv*+ba/b"
+    assert options["format_sort"][0] == "res"
+
+
+def fake_youtube_dl_class(extract_info):
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def extract_info(self, url, download):
+            return extract_info()
+
+    return FakeYoutubeDL
+
+
+def test_run_ytdlp_translates_errors(monkeypatch):
+    def fail():
+        raise DownloadError("ERROR: Private video")
+
+    monkeypatch.setattr(downloader_module, "YoutubeDL", fake_youtube_dl_class(fail))
+
+    with pytest.raises(MediaError) as err:
+        _run_ytdlp({}, "https://youtu.be/abc", download=False)
+    assert err.value.code == "error_restricted"
+
+
+def test_run_ytdlp_empty_result_is_unsupported(monkeypatch):
+    monkeypatch.setattr(downloader_module, "YoutubeDL", fake_youtube_dl_class(lambda: None))
+
+    with pytest.raises(MediaError) as err:
+        _run_ytdlp({}, "https://youtu.be/abc", download=False)
+    assert err.value.code == "error_unsupported"
+
+
+def test_run_ytdlp_returns_info(monkeypatch):
+    monkeypatch.setattr(downloader_module, "YoutubeDL", fake_youtube_dl_class(lambda: {"title": "ok"}))
+
+    assert _run_ytdlp({}, "https://youtu.be/abc", download=False) == {"title": "ok"}
