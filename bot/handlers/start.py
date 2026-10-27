@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from html import escape
+
 from aiogram import Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
@@ -15,7 +17,8 @@ router = Router(name="start")
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, lang: str) -> None:
-    await message.answer(t(lang, "start"))
+    name = message.from_user.first_name if message.from_user else ""
+    await message.answer(t(lang, "start", name=escape(name or "👋")))
 
 
 @router.message(Command("help"))

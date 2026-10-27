@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 
 
 class UserJobLimiter:
     def __init__(self) -> None:
-        self._busy: set[int] = set()
+        # One "cancel" switch per running job. A threading.Event, because the download thread checks it.
+        self._busy: dict[int, threading.Event] = {}
 
     def is_busy(self, user_id: int) -> bool:
         return user_id in self._busy
@@ -19,8 +21,20 @@ class UserJobLimiter:
         if user_id in self._busy:
             yield False
             return
-        self._busy.add(user_id)
+        self._busy[user_id] = threading.Event()
         try:
             yield True
         finally:
-            self._busy.discard(user_id)
+            self._busy.pop(user_id, None)
+
+    def cancel_event(self, user_id: int) -> threading.Event:
+        """The switch for the user's running job; a fresh one if nothing is running."""
+        return self._busy.get(user_id) or threading.Event()
+
+    def cancel(self, user_id: int) -> bool:
+        """Ask the user's running job to stop. False if nothing is running."""
+        event = self._busy.get(user_id)
+        if event is None:
+            return False
+        event.set()
+        return True

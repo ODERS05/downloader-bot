@@ -15,6 +15,7 @@ htmlcov/
 
 # Runtime
 downloads/
+state/
 
 # Editors / OS
 .vscode/

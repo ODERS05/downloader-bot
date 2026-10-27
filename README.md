@@ -25,7 +25,10 @@ Bot:  📹 Never Gonna Give You Up.mp4
   under them
 - **Up to 2 GB per file**, using Telegram's local Bot API server (the normal limit is 50 MB)
 - **Works with 1000+ sites**, powered by [yt-dlp](https://github.com/yt-dlp/yt-dlp)
-- **Private**: only Telegram users you list can use it
+- **Private, easy to share**: send friends the bot's link. When they open it, you get a message with
+  ✅ Let in / ❌ Decline buttons. `/users` shows who has access and lets you remove people
+- **Live progress**: a progress bar while downloading, "waiting in line" when someone else's download is running,
+  and a ✖️ Cancel button
 - **English and Russian**: replies in the user's Telegram app language
 - **Plays everywhere**: prefers H.264 + AAC in MP4 and avoids H.265 (TikTok's top quality), so videos play inline
   on every Telegram client
@@ -71,7 +74,8 @@ sequenceDiagram
 5. **The bot uploads the file** to Telegram through the local Bot API server, then deletes it from the server's disk.
 
 Limits that protect the server: each user can run **one download at a time**, and at most
-`MAX_CONCURRENT_DOWNLOADS` downloads run at once in total.
+`MAX_CONCURRENT_DOWNLOADS` downloads run at once in total. Anyone over that limit sees "⏳ waiting in line" and
+starts automatically when a slot frees up.
 
 ### Why a "local Bot API server"?
 
@@ -91,14 +95,17 @@ downloader-bot/
 │   ├── config.py            # Reads and validates settings from environment variables
 │   ├── i18n.py              # All texts in English and Russian
 │   ├── keyboards.py         # Quality buttons and their callback data
-│   ├── middlewares.py       # Picks the user's language; blocks users not in ALLOWED_USER_IDS
+│   ├── middlewares.py       # Picks the user's language; asks the owner about unknown users
 │   ├── handlers/
 │   │   ├── start.py         # /start and /help
-│   │   └── download.py      # Link → buttons → download → send
+│   │   ├── admin.py         # Owner only: Let in / Decline buttons, /users
+│   │   └── download.py      # Link → buttons → download (with progress and Cancel) → send
 │   ├── services/
 │   │   ├── downloader.py    # yt-dlp wrapper (runs in worker threads, cleans up temp files)
 │   │   ├── media.py         # Data models + pure logic: grouping formats, size estimates
 │   │   ├── request_store.py # Short-lived memory linking button tokens to video info
+│   │   ├── user_store.py    # Friends let in from the chat, saved to state/users.json
+│   │   ├── progress.py      # Download progress + the Cancel switch, shared with the yt-dlp thread
 │   │   └── job_limiter.py   # One download at a time per user
 │   └── utils/
 │       ├── urls.py          # Finds links in messages, blocks private/internal addresses
@@ -129,7 +136,7 @@ ffmpeg · [Deno](https://deno.com/) (yt-dlp needs it to solve YouTube's JavaScri
 | What | Where | Goes into |
 |---|---|---|
 | **Bot token** | Message [@BotFather](https://t.me/BotFather) → `/newbot` → follow the steps | `BOT_TOKEN` |
-| **Your user ID** | Message [@userinfobot](https://t.me/userinfobot). Or start the bot later: it replies to strangers with their ID | `ALLOWED_USER_IDS` |
+| **Your user ID** | Message [@userinfobot](https://t.me/userinfobot). Or start the bot later: it replies to strangers with their ID | `ALLOWED_USER_IDS` (yours first) |
 | **API ID + hash** | Log in at [my.telegram.org](https://my.telegram.org) → *API development tools* → create an app (any name) | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` |
 
 > The API ID/hash identify an "app", not your account's password. Still, keep them secret.
@@ -149,7 +156,7 @@ curl -fsSL https://get.docker.com | sh
 git clone https://github.com/<your-username>/downloader-bot.git
 cd downloader-bot
 cp .env.example .env
-nano .env        # fill in BOT_TOKEN, ALLOWED_USER_IDS, TELEGRAM_API_ID, TELEGRAM_API_HASH
+nano .env        # fill in BOT_TOKEN, ALLOWED_USER_IDS (your ID), TELEGRAM_API_ID, TELEGRAM_API_HASH
 ```
 
 ### 4. Move the bot to the local API server (once)
@@ -176,8 +183,32 @@ Check that it's running:
 docker compose logs -f bot
 ```
 
-You should see `Starting bot: api=http://telegram-bot-api:8081, file limit=2000 MB, allowed users=1`.
-Open your bot in Telegram and send `/start`. 🎉
+You should see `Starting bot: api=http://telegram-bot-api:8081, file limit=2000 MB, allowed users=1 (+0 approved
+in chat), owner=<your ID>`. Open your bot in Telegram and send `/start`. 🎉
+
+### 6. Share it with friends
+
+1. Send them the bot's link: `https://t.me/<your_bot_username>`.
+2. They open it and tap **Start**. The bot tells them it has asked you.
+3. You get a message with their name and **✅ Let in** / **❌ Decline**. Tap one, and they're told right away.
+
+Send `/users` to see everyone who has access and remove people with one tap. People you let in are saved in the
+`state` Docker volume, so they keep access after restarts and updates. (Declined people aren't asked about again;
+removed people can ask again.)
+
+> Press **Start** in your own bot at least once, otherwise Telegram doesn't let the bot message you.
+
+### 7. Make it look nice (optional)
+
+The bot's picture, name and descriptions are set in [@BotFather](https://t.me/BotFather), not in the code:
+
+| Command | What it changes |
+|---|---|
+| `/setuserpic` | Profile picture |
+| `/setdescription` | Text on the empty chat screen, before someone taps Start. E.g. *"Send me a link from YouTube, TikTok or Instagram and I'll send you the video or MP3."* |
+| `/setabouttext` | Short text on the bot's profile page |
+
+The command menu (/start, /help, and /users for you only) and all messages are set by the bot itself.
 
 ---
 
@@ -188,8 +219,9 @@ Open your bot in Telegram and send `/start`. 🎉
 | See logs | `docker compose logs -f bot` |
 | Restart (also updates yt-dlp) | `docker compose restart bot` |
 | Stop | `docker compose down` |
-| Update the bot after `git pull` | `docker compose up -d --build` |
-| Add a friend | Add their ID to `ALLOWED_USER_IDS` in `.env`, then `docker compose up -d` |
+| Update the bot | `git pull && docker compose up -d --build` |
+| Add a friend | Send them the bot's link, then tap **✅ Let in** when the request arrives |
+| See or remove friends | Send `/users` to the bot |
 
 ---
 
@@ -200,7 +232,7 @@ All settings live in `.env`. See `.env.example` for a ready-to-copy template.
 | Variable | Required | Default | What it does |
 |---|---|---|---|
 | `BOT_TOKEN` | ✅ | | Token from @BotFather |
-| `ALLOWED_USER_IDS` | ✅ | | Telegram user IDs allowed to use the bot, comma-separated |
+| `ALLOWED_USER_IDS` | ✅ | | Telegram user IDs always allowed, comma-separated. **The first one is the owner**, who gets access requests |
 | `TELEGRAM_API_ID` | ✅ | | From my.telegram.org, for the local Bot API server |
 | `TELEGRAM_API_HASH` | ✅ | | From my.telegram.org, for the local Bot API server |
 | `MAX_FILE_SIZE_MB` | | `2000` | Largest file the bot sends. Max 2000 (local server) or 50 (cloud) |
@@ -211,6 +243,7 @@ All settings live in `.env`. See `.env.example` for a ready-to-copy template.
 | `LOG_LEVEL` | | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR` |
 | `TELEGRAM_API_URL` | | | Bot API server URL. Docker Compose sets this; leave empty to use the cloud API (50 MB limit) |
 | `DOWNLOAD_DIR` | | `downloads` | Temporary download folder. Docker Compose sets this |
+| `USERS_FILE` | | `state/users.json` | Where friends let in from the chat are saved. Docker Compose sets this |
 
 ---
 
@@ -281,7 +314,13 @@ docker compose restart bot
 - `docker compose ps`: both containers should be `running` / `healthy`.
 - `docker compose logs bot`: look for `Configuration error` (check `.env`) or `Unauthorized`
   (wrong `BOT_TOKEN`, or you skipped the [logOut step](#4-move-the-bot-to-the-local-api-server-once)).
-- Make sure your ID is in `ALLOWED_USER_IDS`. If it isn't, the bot replies "This is a private bot" with your ID.
+- Make sure your ID is **first** in `ALLOWED_USER_IDS`. If it isn't listed, the bot treats you as a stranger.
+
+### I don't get access requests
+
+- The first ID in `ALLOWED_USER_IDS` gets them: check it's yours.
+- Press **Start** in your own bot once. Telegram doesn't let a bot message someone who never started it. The bot
+  logs `Couldn't send the access request` when this happens.
 
 ### "📦 The file is larger than the limit"
 
@@ -327,7 +366,8 @@ The tests don't need the internet or a bot token: Telegram and yt-dlp are replac
 
 - **Secrets** live only in `.env`, which is in `.gitignore`. **Never commit it.** If a token leaks, revoke it in
   @BotFather (`/revoke`).
-- **Only allowlisted users** can use the bot. Everyone else gets a "private bot" reply.
+- **Only people you allow** can use the bot: the IDs in `.env`, plus friends you let in from the chat. Strangers
+  can only trigger one access request each (you aren't asked twice), and declined people are never asked about again.
 - **Links to private networks are refused** (localhost, `10.x`, `192.168.x`, Docker service names, hostnames that
   resolve to private IPs). This stops the bot from being used to reach the server's internal services. Redirects that
   yt-dlp follows aren't checked, which is one more reason to keep the bot private.

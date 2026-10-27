@@ -93,3 +93,16 @@ def test_reads_os_environ_when_no_env_given(monkeypatch):
     monkeypatch.setenv("ALLOWED_USER_IDS", "5")
 
     assert Settings.from_env().bot_token == "999:zzz"
+
+
+def test_first_allowed_id_is_the_owner():
+    settings = Settings.from_env({**BASE_ENV, "ALLOWED_USER_IDS": "333, 111,222"})
+
+    assert settings.admin_user_id == 333
+    assert settings.users_file == Path("state/users.json")
+
+
+def test_users_file_can_be_set():
+    settings = Settings.from_env({**BASE_ENV, "USERS_FILE": "/app/state/u.json"})
+
+    assert settings.users_file == Path("/app/state/u.json")

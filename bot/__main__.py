@@ -11,7 +11,8 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ParseMode
-from aiogram.types import BotCommand
+from aiogram.exceptions import TelegramAPIError
+from aiogram.types import BotCommand, BotCommandScopeChat
 
 from bot.config import ConfigError, Settings
 from bot.handlers import build_router
@@ -20,6 +21,7 @@ from bot.middlewares import AccessMiddleware, LanguageMiddleware
 from bot.services.downloader import Downloader
 from bot.services.job_limiter import UserJobLimiter
 from bot.services.request_store import RequestStore
+from bot.services.user_store import UserStore
 
 logger = logging.getLogger("bot")
 
@@ -35,30 +37,41 @@ def create_bot(settings: Settings) -> Bot:
     )
 
 
-def create_dispatcher(settings: Settings, downloader: Downloader) -> Dispatcher:
+def create_dispatcher(settings: Settings, downloader: Downloader, users: UserStore) -> Dispatcher:
     # Keyword arguments become available to every handler by name (dependency injection).
     dispatcher = Dispatcher(
         settings=settings,
         downloader=downloader,
         store=RequestStore(),
         jobs=UserJobLimiter(),
+        users=users,
     )
+    access = AccessMiddleware(users, settings.admin_user_id)
     for observer in (dispatcher.message, dispatcher.callback_query):
         # Language first, so the "access denied" reply is in the user's language.
         observer.outer_middleware(LanguageMiddleware())
-        observer.outer_middleware(AccessMiddleware(settings.allowed_user_ids))
+        observer.outer_middleware(access)
     dispatcher.include_router(build_router())
     return dispatcher
 
 
-async def set_commands(bot: Bot) -> None:
-    """Show /start and /help in Telegram's menu, translated per app language."""
+async def set_commands(bot: Bot, admin_user_id: int) -> None:
+    """Show /start and /help in Telegram's menu, translated per app language. The owner also sees /users."""
     for lang in TEXTS:
         commands = [
             BotCommand(command="start", description=t(lang, "cmd_start")),
             BotCommand(command="help", description=t(lang, "cmd_help")),
         ]
-        await bot.set_my_commands(commands, language_code=None if lang == "en" else lang)
+        language_code = None if lang == "en" else lang
+        await bot.set_my_commands(commands, language_code=language_code)
+        admin_commands = [*commands, BotCommand(command="users", description=t(lang, "cmd_users"))]
+        try:
+            await bot.set_my_commands(
+                admin_commands, scope=BotCommandScopeChat(chat_id=admin_user_id), language_code=language_code
+            )
+        except TelegramAPIError as err:
+            # The owner hasn't pressed Start in the bot yet. /users still works when typed.
+            logger.warning("Couldn't set the owner's command menu: %s", err)
 
 
 async def run(settings: Settings) -> None:
@@ -71,16 +84,19 @@ async def run(settings: Settings) -> None:
     )
     downloader.prepare()
 
+    users = UserStore(settings.users_file, settings.allowed_user_ids)
     bot = create_bot(settings)
-    dispatcher = create_dispatcher(settings, downloader)
+    dispatcher = create_dispatcher(settings, downloader, users)
     logger.info(
-        "Starting bot: api=%s, file limit=%d MB, allowed users=%d",
+        "Starting bot: api=%s, file limit=%d MB, allowed users=%d (+%d approved in chat), owner=%d",
         settings.telegram_api_url or "cloud",
         settings.max_file_size_mb,
         len(settings.allowed_user_ids),
+        len(users.approved()),
+        settings.admin_user_id,
     )
     try:
-        await set_commands(bot)
+        await set_commands(bot, settings.admin_user_id)
         await dispatcher.start_polling(bot, allowed_updates=dispatcher.resolve_used_update_types())
     finally:
         await bot.session.close()

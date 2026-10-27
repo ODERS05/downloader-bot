@@ -22,13 +22,15 @@ class ConfigError(ValueError):
 @dataclass(frozen=True)
 class Settings:
     bot_token: str
-    allowed_user_ids: frozenset[int]
+    allowed_user_ids: frozenset[int]  # from .env; friends approved in the chat are in users_file
+    admin_user_id: int  # gets access requests; the first ID in ALLOWED_USER_IDS
     telegram_api_url: str | None
     max_file_size_mb: int
     download_dir: Path
     max_concurrent_downloads: int
     cookies_file: Path | None
     log_level: str
+    users_file: Path
     proxy_url: str | None = field(default=None, repr=False)  # may contain a password
 
     @property
@@ -66,15 +68,19 @@ class Settings:
         cookies_raw = env.get("COOKIES_FILE", "").strip()
         cookies_file = Path(cookies_raw) if cookies_raw else None
 
+        user_ids = _parse_user_ids(env.get("ALLOWED_USER_IDS", ""))
+
         return cls(
             bot_token=bot_token,
-            allowed_user_ids=_parse_user_ids(env.get("ALLOWED_USER_IDS", "")),
+            allowed_user_ids=frozenset(user_ids),
+            admin_user_id=user_ids[0],
             telegram_api_url=telegram_api_url,
             max_file_size_mb=max_file_size_mb,
             download_dir=Path(env.get("DOWNLOAD_DIR", "").strip() or "downloads"),
             max_concurrent_downloads=_parse_int(env, "MAX_CONCURRENT_DOWNLOADS", 2, minimum=1),
             cookies_file=cookies_file,
             log_level=env.get("LOG_LEVEL", "INFO").strip().upper() or "INFO",
+            users_file=Path(env.get("USERS_FILE", "").strip() or "state/users.json"),
             proxy_url=_parse_proxy_url(env.get("PROXY_URL", "")),
         )
 
@@ -95,7 +101,8 @@ def _parse_proxy_url(raw: str) -> str | None:
     return raw
 
 
-def _parse_user_ids(raw: str) -> frozenset[int]:
+def _parse_user_ids(raw: str) -> tuple[int, ...]:
+    """In the order written: the first ID is the bot's owner."""
     parts = [p.strip() for p in raw.replace(";", ",").split(",") if p.strip()]
     if not parts:
         raise ConfigError(
@@ -103,7 +110,7 @@ def _parse_user_ids(raw: str) -> frozenset[int]:
             "(message @userinfobot to find it), e.g. ALLOWED_USER_IDS=123456789"
         )
     try:
-        return frozenset(int(p) for p in parts)
+        return tuple(int(p) for p in parts)
     except ValueError as exc:
         raise ConfigError(f"ALLOWED_USER_IDS must be numbers separated by commas, got: {raw!r}") from exc
 

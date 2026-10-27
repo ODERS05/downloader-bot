@@ -17,7 +17,7 @@ ENV PYTHONUNBUFFERED=1 \
 # Run as a normal user, not root. The venv belongs to that user so yt-dlp can self-update.
 RUN useradd --create-home --uid 1000 app \
     && python -m venv /opt/venv \
-    && mkdir -p /downloads /app/data \
+    && mkdir -p /downloads /app/data /app/state \
     && chown -R app:app /opt/venv /downloads /app
 
 WORKDIR /app

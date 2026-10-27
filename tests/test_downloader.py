@@ -1,11 +1,13 @@
+import asyncio
 from pathlib import Path
 
 import pytest
-from yt_dlp.utils import DownloadError
+from yt_dlp.utils import DownloadCancelled, DownloadError
 
 from bot.services import downloader as downloader_module
 from bot.services.downloader import Downloader, _format_options, _run_ytdlp, classify_error
 from bot.services.media import MediaError, video_format_selector
+from bot.services.progress import DownloadProgress
 
 MAX_SIZE = 1000
 
@@ -368,3 +370,75 @@ async def test_download_too_large_is_not_retried(downloader, monkeypatch):
 
     assert err.value.code == "too_large"
     assert used_saved_info == [True]
+
+
+@pytest.mark.parametrize("code", ["too_large", "cancelled"])
+async def test_final_errors_are_not_retried(downloader, monkeypatch, code):
+    used_saved_info = record_ytdlp(monkeypatch, [MediaError(code)])
+
+    with pytest.raises(MediaError) as err:
+        async with downloader.download("https://youtu.be/abc", "720", extracted={"title": "x"}):
+            pass
+
+    assert err.value.code == code
+    assert used_saved_info == [True]
+
+
+def test_run_ytdlp_translates_cancel(monkeypatch):
+    def cancel():
+        raise DownloadCancelled()
+
+    monkeypatch.setattr(downloader_module, "YoutubeDL", fake_youtube_dl_class(cancel))
+
+    with pytest.raises(MediaError) as err:
+        _run_ytdlp({}, "https://youtu.be/abc", download=True)
+
+    assert err.value.code == "cancelled"
+
+
+async def test_download_passes_progress_hooks(downloader, monkeypatch):
+    calls = fake_ytdlp(monkeypatch, {"title": "t"}, files={"abc.mp4": 10})
+    progress = DownloadProgress()
+
+    async with downloader.download("https://youtu.be/abc", "720", progress=progress):
+        pass
+
+    assert calls[0]["progress_hooks"] == [progress.on_download]
+    assert calls[0]["postprocessor_hooks"] == [progress.on_postprocess]
+
+
+async def test_cancel_pressed_after_the_last_hook_drops_the_file(downloader, monkeypatch):
+    progress = DownloadProgress()
+
+    def run(options, url, *, download, saved_info=None):
+        (Path(options["paths"]["home"]) / "abc.mp4").write_bytes(b"v")
+        progress.cancelled.set()
+        return {"title": "t"}
+
+    monkeypatch.setattr(downloader_module, "_run_ytdlp", run)
+
+    with pytest.raises(MediaError) as err:
+        async with downloader.download("https://youtu.be/abc", "720", progress=progress):
+            pass
+
+    assert err.value.code == "cancelled"
+
+
+async def test_waits_in_line_and_can_be_cancelled_there(downloader, monkeypatch):
+    monkeypatch.setattr(downloader_module, "QUEUE_POLL_SECONDS", 0.01)
+    fake_ytdlp(monkeypatch, {"title": "t"}, files={"abc.mp4": 10})
+    progress = DownloadProgress()
+    await downloader._semaphore.acquire()  # someone else is downloading in the only slot
+
+    waiting = asyncio.create_task(downloader.download("https://youtu.be/b", "720", progress=progress).__aenter__())
+    await asyncio.sleep(0.05)
+    assert progress.queued
+    progress.cancelled.set()
+    with pytest.raises(MediaError) as err:
+        await waiting
+
+    assert err.value.code == "cancelled"
+    assert not progress.queued
+    downloader._semaphore.release()
+    async with downloader.download("https://youtu.be/abc", "720"):
+        pass  # the cancelled job didn't keep a slot

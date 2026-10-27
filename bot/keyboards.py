@@ -82,3 +82,42 @@ def quality_keyboard(info: MediaInfo, token: str, lang: str, max_size: int) -> I
         rows.append(1)  # MP3 on its own row
     builder.adjust(*rows)
     return builder.as_markup()
+
+
+class CancelCallback(CallbackData, prefix="cx"):
+    user_id: int  # only the person who started the download may cancel it
+
+
+class AccessCallback(CallbackData, prefix="acc"):
+    """The owner's answer to an access request, or a removal from /users."""
+
+    action: str  # "approve", "deny" or "remove"
+    user_id: int
+    lang: str  # the requester's language, for the "you're in" message
+
+
+def cancel_keyboard(user_id: int, lang: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text=t(lang, "cancel_button"), callback_data=CancelCallback(user_id=user_id))
+    return builder.as_markup()
+
+
+def access_request_keyboard(user_id: int, user_lang: str, lang: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for action, key in (("approve", "approve_button"), ("deny", "deny_button")):
+        builder.button(text=t(lang, key), callback_data=AccessCallback(action=action, user_id=user_id, lang=user_lang))
+    return builder.as_markup()
+
+
+def users_keyboard(users: list[tuple[int, str]], lang: str) -> InlineKeyboardMarkup | None:
+    """One "remove" button per approved user."""
+    if not users:
+        return None
+    builder = InlineKeyboardBuilder()
+    for user_id, name in users:
+        builder.button(
+            text=f"✖️ {name}",
+            callback_data=AccessCallback(action="remove", user_id=user_id, lang=lang),
+        )
+    builder.adjust(1)
+    return builder.as_markup()

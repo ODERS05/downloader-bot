@@ -4,18 +4,28 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import suppress
 from html import escape
 
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardMarkup, Message, ReplyParameters
 from aiogram.utils.chat_action import ChatActionSender
 
 from bot.config import Settings
 from bot.i18n import t
-from bot.keyboards import DownloadCallback, audio_keyboard, auto_choice, quality_keyboard
+from bot.keyboards import (
+    CancelCallback,
+    DownloadCallback,
+    audio_keyboard,
+    auto_choice,
+    cancel_keyboard,
+    quality_keyboard,
+)
 from bot.services.downloader import Downloader
 from bot.services.job_limiter import UserJobLimiter
 from bot.services.media import AUDIO_CHOICE, DownloadedFile, MediaError, MediaInfo
+from bot.services.progress import DownloadProgress
 from bot.services.request_store import RequestStore
 from bot.utils.formatting import format_duration, format_size, safe_filename
 from bot.utils.urls import extract_url, is_public_url
@@ -26,6 +36,9 @@ router = Router(name="download")
 # Uploading 2 GB to the local Bot API server can take a while.
 UPLOAD_TIMEOUT_SECONDS = 60 * 60
 MAX_CAPTION_TITLE_LENGTH = 200
+# Telegram allows editing a message about once a second; every few seconds is plenty for a progress bar.
+PROGRESS_UPDATE_SECONDS = 3
+PROGRESS_BAR_CELLS = 10
 
 
 @router.message(F.text)
@@ -65,12 +78,16 @@ async def handle_link(
 
     choice = auto_choice(info, settings.max_file_size_bytes)
     if choice is not None and message.from_user is not None:
-        with jobs.acquire(message.from_user.id) as acquired:
+        user_id = message.from_user.id
+        with jobs.acquire(user_id) as acquired:
             # A busy user gets the menu instead, to press once the current download is done.
             if acquired:
-                await status.edit_text(t(lang, "downloading", quality=_choice_label(info, choice, lang)))
+                job = _Job(info, choice, lang, user_id, DownloadProgress(jobs.cancel_event(user_id)))
+                await status.edit_text(
+                    t(lang, "downloading", quality=job.quality), reply_markup=cancel_keyboard(user_id, lang)
+                )
                 audio_button = audio_keyboard(info, token, lang, settings.max_file_size_bytes)
-                await _download_and_send(bot, message, status, info, choice, lang, settings, downloader, audio_button)
+                await _download_and_send(bot, message, status, job, settings, downloader, audio_button)
                 return
 
     await status.edit_text(
@@ -96,41 +113,109 @@ async def handle_choice(
         await callback.answer(t(lang, "expired"), show_alert=True)
         return
 
-    with jobs.acquire(callback.from_user.id) as acquired:
+    user_id = callback.from_user.id
+    with jobs.acquire(user_id) as acquired:
         if not acquired:
             await callback.answer(t(lang, "busy"), show_alert=True)
             return
         await callback.answer()
 
-        quality = _choice_label(info, callback_data.choice, lang)
-        status = await menu.reply(t(lang, "downloading", quality=quality))
-        await _download_and_send(bot, menu, status, info, callback_data.choice, lang, settings, downloader)
+        job = _Job(info, callback_data.choice, lang, user_id, DownloadProgress(jobs.cancel_event(user_id)))
+        status = await menu.reply(
+            t(lang, "downloading", quality=job.quality), reply_markup=cancel_keyboard(user_id, lang)
+        )
+        await _download_and_send(bot, menu, status, job, settings, downloader)
+
+
+@router.callback_query(CancelCallback.filter())
+async def handle_cancel(
+    callback: CallbackQuery, callback_data: CancelCallback, lang: str, jobs: UserJobLimiter
+) -> None:
+    if callback.from_user.id != callback_data.user_id or not jobs.cancel(callback_data.user_id):
+        await callback.answer(t(lang, "cancel_too_late"))
+        return
+    await callback.answer(t(lang, "cancelling"))
+
+
+class _Job:
+    """One download: what to fetch, in which language to talk about it, and how far it got."""
+
+    def __init__(self, info: MediaInfo, choice: str, lang: str, user_id: int, progress: DownloadProgress) -> None:
+        self.info = info
+        self.choice = choice
+        self.lang = lang
+        self.user_id = user_id
+        self.progress = progress
+        self.quality = _choice_label(info, choice, lang)
 
 
 async def _download_and_send(
     bot: Bot,
     reply_to: Message,
     status: Message,
-    info: MediaInfo,
-    choice: str,
-    lang: str,
+    job: _Job,
     settings: Settings,
     downloader: Downloader,
     video_markup: InlineKeyboardMarkup | None = None,
 ) -> None:
-    """Download `choice`, send it as a reply to `reply_to`, and report progress/errors in `status`."""
+    """Download the job's choice, send it as a reply to `reply_to`, and report progress/errors in `status`."""
+    lang, info = job.lang, job.info
+    watcher = asyncio.create_task(_show_progress(status, job))
     try:
-        async with downloader.download(info.url, choice, info.extracted) as file:
+        async with downloader.download(info.url, job.choice, info.extracted, job.progress) as file:
+            await _stop(watcher)
             await status.edit_text(t(lang, "uploading"))
             await _send_file(bot, reply_to, file, info.url, video_markup)
     except MediaError as err:
+        await _stop(watcher)
         await status.edit_text(error_text(err, lang, settings))
         return
     except Exception:
-        logger.exception("Failed to download/send %s as %s", info.url, choice)
+        await _stop(watcher)
+        logger.exception("Failed to download/send %s as %s", info.url, job.choice)
         await status.edit_text(t(lang, "error_generic"))
         return
+    finally:
+        await _stop(watcher)  # also when the bot shuts down mid-download
     await status.delete()
+
+
+async def _show_progress(status: Message, job: _Job) -> None:
+    """Every few seconds, update the status message with a progress bar (until cancelled)."""
+    markup = cancel_keyboard(job.user_id, job.lang)
+    shown = progress_text(job)
+    while True:
+        await asyncio.sleep(PROGRESS_UPDATE_SECONDS)
+        text = progress_text(job)
+        if text == shown:
+            continue
+        try:
+            await status.edit_text(text, reply_markup=markup)
+        except TelegramAPIError as err:
+            # E.g. Telegram asked to slow down; the next update tries again.
+            logger.debug("Couldn't update progress: %s", err)
+            continue
+        shown = text
+
+
+async def _stop(task: asyncio.Task[None]) -> None:
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+
+
+def progress_text(job: _Job) -> str:
+    progress, lang = job.progress, job.lang
+    if progress.queued:
+        return t(lang, "queued", quality=job.quality)
+    percent = progress.percent
+    if percent is None:
+        return t(lang, "downloading", quality=job.quality)
+    if percent >= 100:
+        return t(lang, "processing", quality=job.quality)
+    filled = percent * PROGRESS_BAR_CELLS // 100
+    bar = "▰" * filled + "▱" * (PROGRESS_BAR_CELLS - filled)
+    return f"{t(lang, 'downloading', quality=job.quality)}\n{bar} {percent}%"
 
 
 async def _send_file(

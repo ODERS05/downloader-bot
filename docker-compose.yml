@@ -34,12 +34,14 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       TELEGRAM_API_URL: http://telegram-bot-api:8081
       DOWNLOAD_DIR: /downloads
+      USERS_FILE: /app/state/users.json
     depends_on:
       telegram-bot-api:
         condition: service_healthy
     volumes:
       - downloads:/downloads   # temporary files, deleted after every download
       - ./data:/app/data:ro    # put cookies.txt here if you need it
+      - state:/app/state       # friends you let in from the chat (kept across restarts and updates)
     logging:
       driver: json-file
       options:
@@ -49,3 +51,4 @@ services:
 volumes:
   telegram-bot-api-data:
   downloads:
+  state:

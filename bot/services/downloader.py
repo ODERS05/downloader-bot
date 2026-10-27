@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from yt_dlp import YoutubeDL
-from yt_dlp.utils import DownloadError
+from yt_dlp.utils import DownloadCancelled, DownloadError
 
 from bot.services.media import (
     AUDIO_CHOICE,
@@ -31,6 +31,7 @@ from bot.services.media import (
     extract_qualities,
     video_format_selector,
 )
+from bot.services.progress import DownloadProgress
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,10 @@ SOCKET_TIMEOUT_SECONDS = 30
 RETRIES = 3
 JOB_DIR_PREFIX = "job-"
 COOKIES_COPY_NAME = "cookies.txt"
+# While waiting for a free download slot, check this often whether the user pressed Cancel.
+QUEUE_POLL_SECONDS = 1
+# Errors that a second, fresh lookup wouldn't fix.
+_FINAL_ERRORS = frozenset({"too_large", "cancelled"})
 # Big parts of the lookup result the download never needs; dropped to keep saved lookups small.
 UNUSED_INFO_KEYS = ("automatic_captions", "subtitles", "thumbnails", "heatmap", "description")
 
@@ -137,17 +142,44 @@ class Downloader:
 
     @asynccontextmanager
     async def download(
-        self, url: str, choice: str, extracted: dict[str, Any] | None = None
+        self,
+        url: str,
+        choice: str,
+        extracted: dict[str, Any] | None = None,
+        progress: DownloadProgress | None = None,
     ) -> AsyncIterator[DownloadedFile]:
         """Download `url` as `choice` ("mp3", "best" or a height like "720").
 
         `extracted` is the saved lookup from `probe`; reusing it skips a second lookup.
+        `progress` reports how far the download is, and stops it when its `cancelled` is set.
         The file is deleted when the `async with` block ends.
         """
+        progress = progress or DownloadProgress()
         with self._job_dir() as workdir:
-            async with self._semaphore:
-                result = await asyncio.to_thread(self._download_with_fallback, url, choice, workdir, extracted)
+            await self._wait_for_slot(progress)
+            try:
+                result = await asyncio.to_thread(
+                    self._download_with_fallback, url, choice, workdir, extracted, progress
+                )
+            finally:
+                self._semaphore.release()
             yield result
+
+    async def _wait_for_slot(self, progress: DownloadProgress) -> None:
+        """Wait until fewer than MAX_CONCURRENT_DOWNLOADS run, unless the user cancels first."""
+        progress.queued = self._semaphore.locked()
+        # One waiting acquire for the whole wait, so jobs keep their place in line.
+        slot = asyncio.ensure_future(self._semaphore.acquire())
+        try:
+            while not slot.done():
+                if progress.cancelled.is_set():
+                    slot.cancel()
+                    if slot.done() and not slot.cancelled():
+                        self._semaphore.release()  # got the slot at the same moment: give it back
+                    raise MediaError("cancelled")
+                await asyncio.wait({slot}, timeout=QUEUE_POLL_SECONDS)
+        finally:
+            progress.queued = False
 
     @contextmanager
     def _job_dir(self) -> Iterator[Path]:
@@ -205,29 +237,46 @@ class Downloader:
         )
 
     def _download_with_fallback(
-        self, url: str, choice: str, workdir: Path, extracted: dict[str, Any] | None
+        self,
+        url: str,
+        choice: str,
+        workdir: Path,
+        extracted: dict[str, Any] | None,
+        progress: DownloadProgress,
     ) -> DownloadedFile:
         if extracted is None:
-            return self._download_sync(url, choice, workdir, None)
+            return self._download_sync(url, choice, workdir, None, progress)
         try:
-            return self._download_sync(url, choice, workdir, extracted)
+            return self._download_sync(url, choice, workdir, extracted, progress)
         except MediaError as err:
-            if err.code == "too_large":
+            if err.code in _FINAL_ERRORS:
                 raise
             # The saved links may have expired; a fresh lookup gets new ones.
             logger.info("Saved lookup for %s failed (%s), looking it up again", url, err.code)
         _empty_dir(workdir)
-        return self._download_sync(url, choice, workdir, None)
+        return self._download_sync(url, choice, workdir, None, progress)
 
-    def _download_sync(self, url: str, choice: str, workdir: Path, extracted: dict[str, Any] | None) -> DownloadedFile:
+    def _download_sync(
+        self,
+        url: str,
+        choice: str,
+        workdir: Path,
+        extracted: dict[str, Any] | None,
+        progress: DownloadProgress,
+    ) -> DownloadedFile:
         options = {
             **self._base_options(workdir),
             "paths": {"home": str(workdir), "temp": str(workdir)},
             "outtmpl": "%(id).60B.%(ext)s",
             "max_filesize": self._max_file_size,
+            "progress_hooks": [progress.on_download],
+            "postprocessor_hooks": [progress.on_postprocess],
             **_format_options(choice),
         }
         info = _run_ytdlp(options, url, download=True, saved_info=extracted)
+        if progress.cancelled.is_set():
+            # Pressed after yt-dlp's last hook: don't send a file the user no longer wants.
+            raise MediaError("cancelled")
 
         path = _find_output_file(workdir)
         if path is None:
@@ -281,6 +330,8 @@ def _run_ytdlp(
             else:
                 # yt-dlp fills in the dict as it works; keep the saved one untouched for retries.
                 info = ydl.process_ie_result(copy.deepcopy(saved_info), download=download)
+    except DownloadCancelled as exc:
+        raise MediaError("cancelled") from exc
     except DownloadError as exc:
         raise MediaError(classify_error(str(exc))) from exc
     if not info:
