@@ -11,6 +11,9 @@ from bot.services.media import AUDIO_CHOICE, BEST_CHOICE, MediaInfo
 from bot.utils.formatting import format_size
 
 BUTTONS_PER_ROW = 2
+# Short clips (Shorts, TikTok, Reels) with this few qualities are sent right away, without a menu.
+AUTO_DOWNLOAD_MAX_SECONDS = 3 * 60
+AUTO_DOWNLOAD_MAX_QUALITIES = 2
 
 
 class DownloadCallback(CallbackData, prefix="dl"):
@@ -23,6 +26,27 @@ class DownloadCallback(CallbackData, prefix="dl"):
 def fits(size: int | None, limit: int) -> bool:
     """Unknown sizes are allowed: the downloader re-checks the real file."""
     return size is None or size <= limit
+
+
+def auto_choice(info: MediaInfo, max_size: int) -> str | None:
+    """The quality to send right away for a short clip, or None to show the menu."""
+    if not info.duration or info.duration > AUTO_DOWNLOAD_MAX_SECONDS:
+        return None
+    if not info.qualities:
+        return BEST_CHOICE
+    if len(info.qualities) > AUTO_DOWNLOAD_MAX_QUALITIES:
+        return None
+    fitting = [q for q in info.qualities if fits(q.estimated_size, max_size)]
+    return str(fitting[0].height) if fitting else None
+
+
+def audio_keyboard(info: MediaInfo, token: str, lang: str, max_size: int) -> InlineKeyboardMarkup | None:
+    """A single MP3 button, shown under a clip that was sent without a menu."""
+    if not fits(info.audio_size, max_size):
+        return None
+    builder = InlineKeyboardBuilder()
+    builder.button(text=t(lang, "audio_button"), callback_data=DownloadCallback(token=token, choice=AUDIO_CHOICE))
+    return builder.as_markup()
 
 
 def quality_keyboard(info: MediaInfo, token: str, lang: str, max_size: int) -> InlineKeyboardMarkup | None:

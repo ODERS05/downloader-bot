@@ -5,7 +5,7 @@ from yt_dlp.utils import DownloadError
 
 from bot.services import downloader as downloader_module
 from bot.services.downloader import Downloader, _format_options, _run_ytdlp, classify_error
-from bot.services.media import MediaError
+from bot.services.media import MediaError, video_format_selector
 
 MAX_SIZE = 1000
 
@@ -38,9 +38,14 @@ def fake_ytdlp(monkeypatch, info: dict, files: dict[str, int] | None = None):
     [
         ("ERROR: [youtube] abc: Sign in to confirm you're not a bot", "error_blocked"),
         ("HTTP Error 429: Too Many Requests", "error_blocked"),
+        ("ERROR: [TikTok] 123: Your IP address is blocked from accessing this post", "error_blocked"),
+        ("[Instagram] abc: Requested content is not available, rate-limit reached or login required", "error_blocked"),
+        ("ERROR: The uploader has not made this video available in your country", "error_blocked"),
+        ("ERROR: This video is not available from your location due to geo restriction", "error_blocked"),
         ("ERROR: [youtube] abc: Private video. Sign in if you've been granted access", "error_restricted"),
         ("Sign in to confirm your age", "error_restricted"),
         ("ERROR: [vimeo] 1: The web client only works when logged-in. Use --cookies", "error_restricted"),
+        ("[Instagram] abc: Restricted Video: You must be 18 years old or over to see this video", "error_restricted"),
         ("ERROR: Unsupported URL: https://example.com", "error_unsupported"),
         ("ERROR: [youtube] abc: Video unavailable", "error_unsupported"),
         ("ERROR: something exploded", "error_generic"),
@@ -168,7 +173,7 @@ async def test_download_video_returns_file_and_cleans_up(downloader, monkeypatch
 
     assert not workdir.exists()
     options = calls[0]
-    assert options["format"] == "bv*[height<=?720]+ba/b[height<=?720]"
+    assert options["format"] == video_format_selector(720)
     assert options["merge_output_format"] == "mp4"
     assert options["max_filesize"] == MAX_SIZE
 
@@ -216,7 +221,8 @@ async def test_downloaded_file_over_limit_raises_too_large(downloader, monkeypat
 def test_format_options_for_best():
     options = _format_options("best")
 
-    assert options["format"] == "bv*+ba/b"
+    assert options["format"].startswith("bv*[vcodec!~=")
+    assert options["format"].endswith("/bv*+ba/b")
     assert options["format_sort"][0] == "res"
 
 
@@ -305,6 +311,16 @@ def test_youtube_hls_formats_are_skipped(downloader, tmp_path):
     options = downloader._base_options(tmp_path)
 
     assert options["extractor_args"] == {"youtube": {"skip": ["hls"]}}
+
+
+def test_proxy_is_passed_to_ytdlp(tmp_path):
+    instance = Downloader(tmp_path / "downloads", MAX_SIZE, 1, proxy_url="socks5://user:pass@proxy:1080")
+
+    assert instance._base_options(tmp_path)["proxy"] == "socks5://user:pass@proxy:1080"
+
+
+def test_no_proxy_by_default(downloader, tmp_path):
+    assert "proxy" not in downloader._base_options(tmp_path)
 
 
 def record_ytdlp(monkeypatch, results):

@@ -21,11 +21,14 @@ Bot:  📹 Never Gonna Give You Up.mp4
 
 - **Quality picker**: buttons for every available resolution (144p–4K), with the estimated file size
 - **MP3**: audio only, 192 kbps
+- **Shorts, TikTok and Reels**: short clips with one or two qualities are sent right away, with an MP3 button
+  under them
 - **Up to 2 GB per file**, using Telegram's local Bot API server (the normal limit is 50 MB)
 - **Works with 1000+ sites**, powered by [yt-dlp](https://github.com/yt-dlp/yt-dlp)
 - **Private**: only Telegram users you list can use it
 - **English and Russian**: replies in the user's Telegram app language
-- **Plays everywhere**: prefers H.264 + AAC in MP4, so videos play inline on every Telegram client
+- **Plays everywhere**: prefers H.264 + AAC in MP4 and avoids H.265 (TikTok's top quality), so videos play inline
+  on every Telegram client
 - **Keeps working**: yt-dlp updates itself each time the bot starts
 - **Docker Compose**: one command to start, restarts by itself after crashes or reboots
 
@@ -203,6 +206,7 @@ All settings live in `.env`. See `.env.example` for a ready-to-copy template.
 | `MAX_FILE_SIZE_MB` | | `2000` | Largest file the bot sends. Max 2000 (local server) or 50 (cloud) |
 | `MAX_CONCURRENT_DOWNLOADS` | | `2` | Downloads running at the same time, for all users together |
 | `COOKIES_FILE` | | | Path to a cookies.txt *inside the container*, e.g. `/app/data/cookies.txt` |
+| `PROXY_URL` | | | Proxy for all downloads, e.g. `socks5://user:password@host:1080` or `http://host:8080` |
 | `YTDLP_AUTO_UPDATE` | | `true` | Update yt-dlp each time the container starts |
 | `LOG_LEVEL` | | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR` |
 | `TELEGRAM_API_URL` | | | Bot API server URL. Docker Compose sets this; leave empty to use the cloud API (50 MB limit) |
@@ -233,6 +237,36 @@ logged-in YouTube session:
 Cookies also fix **age-restricted** videos, and Instagram/X/Vimeo posts that need login. You can export cookies for
 several sites into the same file. More details: [yt-dlp FAQ](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp)
 and [YouTube extractor notes](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies).
+
+### Instagram Reels
+
+From a server, Instagram asks for a login for almost every post, so the bot needs Instagram cookies.
+
+1. ⚠️ **Use a secondary Instagram account.** Accounts that download a lot can be limited or banned.
+2. Log in to instagram.com with it in a private window, open any Reel, and export the cookies as above.
+3. `COOKIES_FILE` is one file for all sites. To use both YouTube and Instagram, export each site and join the
+   files, keeping the `# Netscape HTTP Cookie File` line only once at the top:
+
+   ```bash
+   cat youtube-cookies.txt > data/cookies.txt
+   grep -v '^# Netscape' instagram-cookies.txt >> data/cookies.txt
+   docker compose up -d
+   ```
+
+Posts with several videos (carousels) count as playlists and aren't supported.
+
+### TikTok: "🤖 The site is blocking this server"
+
+TikTok often blocks datacenter IPs, and some videos aren't available in the server's country. Cookies don't
+help here, but a proxy does. Set `PROXY_URL` in `.env` (a residential proxy works best) and restart:
+
+```bash
+echo "PROXY_URL=socks5://user:password@proxy.example.com:1080" >> .env
+docker compose up -d
+```
+
+The proxy is used for every site, so it can also help when YouTube or Instagram block the server.
+TikTok photo slideshows (`/photo/` links) have no video and aren't supported yet.
 
 ### Downloads suddenly stopped working
 

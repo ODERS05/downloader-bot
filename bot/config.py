@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
 # Telegram's hard upload limits for bots.
 CLOUD_API_LIMIT_MB = 50
 LOCAL_API_LIMIT_MB = 2000
+PROXY_SCHEMES = frozenset({"http", "https", "socks4", "socks4a", "socks5", "socks5h"})
 
 
 class ConfigError(ValueError):
@@ -27,6 +29,7 @@ class Settings:
     max_concurrent_downloads: int
     cookies_file: Path | None
     log_level: str
+    proxy_url: str | None = field(default=None, repr=False)  # may contain a password
 
     @property
     def max_file_size_bytes(self) -> int:
@@ -72,7 +75,24 @@ class Settings:
             max_concurrent_downloads=_parse_int(env, "MAX_CONCURRENT_DOWNLOADS", 2, minimum=1),
             cookies_file=cookies_file,
             log_level=env.get("LOG_LEVEL", "INFO").strip().upper() or "INFO",
+            proxy_url=_parse_proxy_url(env.get("PROXY_URL", "")),
         )
+
+
+def _parse_proxy_url(raw: str) -> str | None:
+    raw = raw.strip()
+    if not raw:
+        return None
+    # The message never repeats the value: it may contain a password.
+    error = ConfigError("PROXY_URL must look like socks5://user:password@host:1080 or http://host:8080")
+    try:
+        parts = urlsplit(raw)
+        parts.port  # noqa: B018 - raises ValueError for a non-numeric port
+    except ValueError as exc:
+        raise error from exc
+    if parts.scheme.lower() not in PROXY_SCHEMES or not parts.hostname:
+        raise error
+    return raw
 
 
 def _parse_user_ids(raw: str) -> frozenset[int]:

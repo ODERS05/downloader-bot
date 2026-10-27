@@ -67,6 +67,7 @@ async def run(settings: Settings) -> None:
         max_file_size=settings.max_file_size_bytes,
         max_concurrent=settings.max_concurrent_downloads,
         cookies_file=settings.cookies_file,
+        proxy_url=settings.proxy_url,
     )
     downloader.prepare()
 

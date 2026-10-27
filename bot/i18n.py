@@ -14,15 +14,17 @@ RUSSIAN_SPEAKING = frozenset({"ru", "be", "kk", "ky"})
 TEXTS: dict[str, dict[str, str]] = {
     "en": {
         "start": (
-            "👋 Hi! Send me a link to a video from <b>YouTube</b> "
-            "(or TikTok, Instagram, X, Vimeo and 1000+ other sites).\n\n"
-            "I'll show you the available qualities, and you choose which one to download."
+            "👋 Hi! Send me a link to a video from <b>YouTube</b>, <b>TikTok</b> or <b>Instagram</b> "
+            "(Shorts and Reels too, plus X, Vimeo and 1000+ other sites).\n\n"
+            "I'll show you the available qualities, and you choose which one to download. "
+            "Short clips are sent right away."
         ),
         "help": (
             "<b>How to use</b>\n"
             "1. Send a video link.\n"
             "2. Choose a quality or 🎵 MP3.\n"
             "3. Wait, and I'll send you the file.\n\n"
+            "Short clips with only one or two qualities are sent right away, with a 🎵 MP3 button under them.\n"
             "Max file size: <b>{limit}</b>. Playlists and live streams aren't supported."
         ),
         "cmd_start": "Start the bot",
@@ -49,21 +51,23 @@ TEXTS: dict[str, dict[str, str]] = {
             "The bot owner can add cookies to fix this (see README)."
         ),
         "error_blocked": (
-            "🤖 The site is blocking this server. The bot owner can add cookies to fix this (see README)."
+            "🤖 The site is blocking this server. The bot owner can add cookies or a proxy to fix this (see README)."
         ),
         "error_generic": "❌ Something went wrong. Try again later or choose another quality.",
     },
     "ru": {
         "start": (
-            "👋 Привет! Отправь мне ссылку на видео с <b>YouTube</b> "
-            "(или TikTok, Instagram, X, Vimeo и ещё 1000+ сайтов).\n\n"
-            "Я покажу доступное качество, и ты выберешь, в каком скачать."
+            "👋 Привет! Отправь мне ссылку на видео с <b>YouTube</b>, <b>TikTok</b> или <b>Instagram</b> "
+            "(Shorts и Reels тоже, а ещё X, Vimeo и 1000+ других сайтов).\n\n"
+            "Я покажу доступное качество, и ты выберешь, в каком скачать. "
+            "Короткие ролики присылаю сразу."
         ),
         "help": (
             "<b>Как пользоваться</b>\n"
             "1. Отправь ссылку на видео.\n"
             "2. Выбери качество или 🎵 MP3.\n"
             "3. Подожди — я пришлю файл.\n\n"
+            "Короткие ролики с одним-двумя вариантами качества присылаю сразу, с кнопкой 🎵 MP3 под ними.\n"
             "Максимальный размер файла: <b>{limit}</b>. Плейлисты и прямые эфиры не поддерживаются."
         ),
         "cmd_start": "Запустить бота",
@@ -89,7 +93,9 @@ TEXTS: dict[str, dict[str, str]] = {
             "🔒 Видео приватное, с возрастным ограничением или требует входа в аккаунт. "
             "Владелец бота может добавить cookies (см. README)."
         ),
-        "error_blocked": ("🤖 Сайт блокирует этот сервер. Владелец бота может добавить cookies (см. README)."),
+        "error_blocked": (
+            "🤖 Сайт блокирует этот сервер. Владелец бота может добавить cookies или прокси (см. README)."
+        ),
         "error_generic": "❌ Что-то пошло не так. Попробуй позже или выбери другое качество.",
     },
 }

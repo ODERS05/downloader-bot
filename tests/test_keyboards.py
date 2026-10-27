@@ -1,4 +1,13 @@
-from bot.keyboards import DownloadCallback, fits, quality_keyboard
+import pytest
+
+from bot.keyboards import (
+    AUTO_DOWNLOAD_MAX_SECONDS,
+    DownloadCallback,
+    audio_keyboard,
+    auto_choice,
+    fits,
+    quality_keyboard,
+)
 from bot.services.media import Quality
 from tests.conftest import MB, make_info
 
@@ -55,3 +64,42 @@ def test_keyboard_is_none_when_nothing_fits():
     qualities = (Quality(360, "360p", 60 * MB),)
 
     assert quality_keyboard(make_info(qualities=qualities, audio_size=60 * MB), "tok", "en", 50 * MB) is None
+
+
+SHORT_CLIP = 30
+
+
+def test_auto_choice_sends_short_clip_with_few_qualities():
+    qualities = (Quality(1280, "720p", 5 * MB), Quality(1024, "576p", 3 * MB))
+
+    assert auto_choice(make_info(duration=SHORT_CLIP, qualities=qualities), 50 * MB) == "1280"
+
+
+def test_auto_choice_skips_qualities_over_limit():
+    qualities = (Quality(1280, "720p", 60 * MB), Quality(1024, "576p", 3 * MB))
+
+    assert auto_choice(make_info(duration=SHORT_CLIP, qualities=qualities), 50 * MB) == "1024"
+
+
+def test_auto_choice_uses_best_when_site_lists_no_resolutions():
+    assert auto_choice(make_info(duration=SHORT_CLIP, qualities=()), 50 * MB) == "best"
+
+
+@pytest.mark.parametrize(
+    "info",
+    [
+        make_info(duration=SHORT_CLIP),  # three qualities: let the user choose
+        make_info(duration=AUTO_DOWNLOAD_MAX_SECONDS + 1, qualities=()),
+        make_info(duration=None, qualities=()),
+        make_info(duration=SHORT_CLIP, qualities=(Quality(720, "720p", 60 * MB),)),
+    ],
+)
+def test_auto_choice_shows_menu(info):
+    assert auto_choice(info, 50 * MB) is None
+
+
+def test_audio_keyboard():
+    markup = audio_keyboard(make_info(), "tok", "en", 50 * MB)
+
+    assert button_rows(markup) == [[("🎵 Audio (MP3)", "mp3")]]
+    assert audio_keyboard(make_info(audio_size=60 * MB), "tok", "en", 50 * MB) is None

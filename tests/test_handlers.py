@@ -26,6 +26,7 @@ def make_message(text: str = "", chat_id: int = 10, message_id: int = 5) -> Magi
     message.text = text
     message.chat = SimpleNamespace(id=chat_id)
     message.message_id = message_id
+    message.from_user = SimpleNamespace(id=1)
     message.answer = AsyncMock()
     status = MagicMock()
     status.edit_text = AsyncMock()
@@ -86,10 +87,17 @@ def test_build_router_includes_all_handlers():
 # --- sending a link ---
 
 
+async def send_link(settings, message, downloader, store=None, jobs=None):
+    bot = AsyncMock()
+    store = store if store is not None else RequestStore()
+    await handle_link(message, "en", settings, downloader, store, jobs or UserJobLimiter(), bot)
+    return bot
+
+
 async def test_message_without_link(settings):
     message = make_message("hello")
 
-    await handle_link(message, "en", settings, FakeDownloader(), RequestStore())
+    await send_link(settings, message, FakeDownloader())
 
     message.answer.assert_awaited_once_with(TEXTS["en"]["no_link"])
 
@@ -98,7 +106,7 @@ async def test_private_network_link_is_rejected(settings):
     message = make_message("http://localhost:8081/")
     downloader = FakeDownloader()
 
-    await handle_link(message, "en", settings, downloader, RequestStore())
+    await send_link(settings, message, downloader)
 
     message.answer.assert_awaited_once_with(TEXTS["en"]["bad_link"])
     downloader.probe.assert_not_awaited()
@@ -108,7 +116,7 @@ async def test_link_shows_quality_buttons(settings):
     message = make_message("https://youtu.be/abc")
     store = RequestStore()
 
-    await handle_link(message, "en", settings, FakeDownloader(info=make_info()), store)
+    await send_link(settings, message, FakeDownloader(info=make_info()), store)
 
     status = message.reply.return_value
     text = status.edit_text.await_args.args[0]
@@ -122,7 +130,7 @@ async def test_link_when_nothing_fits(settings):
     message = make_message("https://youtu.be/abc")
     info = make_info(qualities=(Quality(720, "720p", 999 * MB),), audio_size=999 * MB)
 
-    await handle_link(message, "en", settings, FakeDownloader(info=info), RequestStore())
+    await send_link(settings, message, FakeDownloader(info=info))
 
     assert "50.0 MB" in message.reply.return_value.edit_text.await_args.args[0]
 
@@ -134,9 +142,60 @@ async def test_link_when_nothing_fits(settings):
 async def test_link_lookup_errors(settings, error, expected_key):
     message = make_message("https://youtu.be/abc")
 
-    await handle_link(message, "en", settings, FakeDownloader(probe_error=error), RequestStore())
+    await send_link(settings, message, FakeDownloader(probe_error=error))
 
     message.reply.return_value.edit_text.assert_awaited_once_with(TEXTS["en"][expected_key])
+
+
+def short_clip(**overrides):
+    return make_info(
+        url="https://www.tiktok.com/@me/video/1", duration=15, qualities=(Quality(1280, "720p", 5 * MB),), **overrides
+    )
+
+
+async def test_short_clip_is_sent_without_menu(settings, tmp_path):
+    message = make_message("https://vm.tiktok.com/xyz/")
+    store = RequestStore()
+    downloader = FakeDownloader(info=short_clip(extracted={"id": "1"}), file=make_file(tmp_path))
+
+    bot = await send_link(settings, message, downloader, store)
+
+    assert downloader.downloads == [("https://www.tiktok.com/@me/video/1", "1280")]
+    assert downloader.extracted == [{"id": "1"}]
+    status = message.reply.return_value
+    assert "720p" in status.edit_text.await_args_list[0].args[0]
+    kwargs = bot.send_video.await_args.kwargs
+    assert kwargs["reply_parameters"].message_id == message.message_id
+    # MP3 is still available, as a button under the video.
+    (button,) = kwargs["reply_markup"].inline_keyboard[0]
+    callback = DownloadCallback.unpack(button.callback_data)
+    assert callback.choice == "mp3"
+    assert store.get(callback.token) is not None
+    status.delete.assert_awaited_once()
+
+
+async def test_short_clip_shows_menu_while_user_is_busy(settings):
+    message = make_message("https://vm.tiktok.com/xyz/")
+    downloader = FakeDownloader(info=short_clip())
+    jobs = UserJobLimiter()
+
+    with jobs.acquire(1):
+        await send_link(settings, message, downloader, jobs=jobs)
+
+    assert downloader.downloads == []
+    assert message.reply.return_value.edit_text.await_args.kwargs["reply_markup"] is not None
+
+
+async def test_short_clip_download_error_is_shown(settings):
+    message = make_message("https://vm.tiktok.com/xyz/")
+    jobs = UserJobLimiter()
+    downloader = FakeDownloader(info=short_clip(), download_error=MediaError("error_blocked"))
+
+    bot = await send_link(settings, message, downloader, jobs=jobs)
+
+    message.reply.return_value.edit_text.assert_awaited_with(TEXTS["en"]["error_blocked"])
+    bot.send_video.assert_not_awaited()
+    assert not jobs.is_busy(1)
 
 
 # --- pressing a quality button ---

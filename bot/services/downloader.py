@@ -43,7 +43,18 @@ UNUSED_INFO_KEYS = ("automatic_captions", "subtitles", "thumbnails", "heatmap", 
 
 # Substrings of yt-dlp error messages, checked in order, mapped to i18n keys.
 _ERROR_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("error_blocked", ("not a bot", "http error 429", "too many requests", "rate-limit")),
+    (
+        "error_blocked",
+        (
+            "not a bot",
+            "http error 429",
+            "too many requests",
+            "rate-limit",
+            "ip address is blocked",
+            "available in your country",
+            "geo restriction",
+        ),
+    ),
     (
         "error_restricted",
         (
@@ -51,6 +62,7 @@ _ERROR_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "sign in",
             "age-restricted",
             "confirm your age",
+            "years old or over",
             "members-only",
             "login required",
             "log in",
@@ -90,10 +102,12 @@ class Downloader:
         max_file_size: int,
         max_concurrent: int,
         cookies_file: Path | None = None,
+        proxy_url: str | None = None,
     ) -> None:
         self._download_dir = download_dir
         self._max_file_size = max_file_size
         self._cookies_file = cookies_file
+        self._proxy_url = proxy_url
         self._semaphore = asyncio.Semaphore(max_concurrent)
 
     def prepare(self) -> None:
@@ -101,6 +115,9 @@ class Downloader:
         self._download_dir.mkdir(parents=True, exist_ok=True)
         for leftover in self._download_dir.glob(f"{JOB_DIR_PREFIX}*"):
             shutil.rmtree(leftover, ignore_errors=True)
+        if self._proxy_url:
+            # Not the URL itself: it may contain a password.
+            logger.info("Downloading through a proxy")
 
         if self._cookies_file is None:
             return
@@ -157,6 +174,8 @@ class Downloader:
             # fragments; the plain HTTPS formats cover the same qualities.
             "extractor_args": {"youtube": {"skip": ["hls"]}},
         }
+        if self._proxy_url:
+            options["proxy"] = self._proxy_url
         if self._cookies_file:
             # yt-dlp rewrites the cookie file when it finishes. Each job gets its own copy, so
             # parallel jobs can't corrupt each other's cookies and the original stays read-only.

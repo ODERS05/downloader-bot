@@ -1,4 +1,4 @@
-"""The main flow: link → quality buttons → download → send the file."""
+"""The main flow: link → quality buttons (skipped for short clips) → download → send the file."""
 
 from __future__ import annotations
 
@@ -7,12 +7,12 @@ import logging
 from html import escape
 
 from aiogram import Bot, F, Router
-from aiogram.types import CallbackQuery, FSInputFile, Message, ReplyParameters
+from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardMarkup, Message, ReplyParameters
 from aiogram.utils.chat_action import ChatActionSender
 
 from bot.config import Settings
 from bot.i18n import t
-from bot.keyboards import DownloadCallback, quality_keyboard
+from bot.keyboards import DownloadCallback, audio_keyboard, auto_choice, quality_keyboard
 from bot.services.downloader import Downloader
 from bot.services.job_limiter import UserJobLimiter
 from bot.services.media import AUDIO_CHOICE, DownloadedFile, MediaError, MediaInfo
@@ -30,7 +30,13 @@ MAX_CAPTION_TITLE_LENGTH = 200
 
 @router.message(F.text)
 async def handle_link(
-    message: Message, lang: str, settings: Settings, downloader: Downloader, store: RequestStore
+    message: Message,
+    lang: str,
+    settings: Settings,
+    downloader: Downloader,
+    store: RequestStore,
+    jobs: UserJobLimiter,
+    bot: Bot,
 ) -> None:
     url = extract_url(message.text)
     if url is None:
@@ -56,6 +62,17 @@ async def handle_link(
     if keyboard is None:
         await status.edit_text(t(lang, "nothing_fits", limit=format_size(settings.max_file_size_bytes)))
         return
+
+    choice = auto_choice(info, settings.max_file_size_bytes)
+    if choice is not None and message.from_user is not None:
+        with jobs.acquire(message.from_user.id) as acquired:
+            # A busy user gets the menu instead, to press once the current download is done.
+            if acquired:
+                await status.edit_text(t(lang, "downloading", quality=_choice_label(info, choice, lang)))
+                audio_button = audio_keyboard(info, token, lang, settings.max_file_size_bytes)
+                await _download_and_send(bot, message, status, info, choice, lang, settings, downloader, audio_button)
+                return
+
     await status.edit_text(
         t(lang, "choose", title=escape(info.title), details=_details_line(info)),
         reply_markup=keyboard,
@@ -87,21 +104,42 @@ async def handle_choice(
 
         quality = _choice_label(info, callback_data.choice, lang)
         status = await menu.reply(t(lang, "downloading", quality=quality))
-        try:
-            async with downloader.download(info.url, callback_data.choice, info.extracted) as file:
-                await status.edit_text(t(lang, "uploading"))
-                await _send_file(bot, menu, file, info.url)
-        except MediaError as err:
-            await status.edit_text(error_text(err, lang, settings))
-            return
-        except Exception:
-            logger.exception("Failed to download/send %s as %s", info.url, callback_data.choice)
-            await status.edit_text(t(lang, "error_generic"))
-            return
-        await status.delete()
+        await _download_and_send(bot, menu, status, info, callback_data.choice, lang, settings, downloader)
 
 
-async def _send_file(bot: Bot, menu: Message, file: DownloadedFile, source_url: str) -> None:
+async def _download_and_send(
+    bot: Bot,
+    reply_to: Message,
+    status: Message,
+    info: MediaInfo,
+    choice: str,
+    lang: str,
+    settings: Settings,
+    downloader: Downloader,
+    video_markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    """Download `choice`, send it as a reply to `reply_to`, and report progress/errors in `status`."""
+    try:
+        async with downloader.download(info.url, choice, info.extracted) as file:
+            await status.edit_text(t(lang, "uploading"))
+            await _send_file(bot, reply_to, file, info.url, video_markup)
+    except MediaError as err:
+        await status.edit_text(error_text(err, lang, settings))
+        return
+    except Exception:
+        logger.exception("Failed to download/send %s as %s", info.url, choice)
+        await status.edit_text(t(lang, "error_generic"))
+        return
+    await status.delete()
+
+
+async def _send_file(
+    bot: Bot,
+    menu: Message,
+    file: DownloadedFile,
+    source_url: str,
+    video_markup: InlineKeyboardMarkup | None = None,
+) -> None:
     chat_id = menu.chat.id
     extension = file.path.suffix.lstrip(".") or ("mp3" if file.kind == "audio" else "mp4")
     upload = FSInputFile(file.path, filename=safe_filename(file.title, extension))
@@ -133,6 +171,7 @@ async def _send_file(bot: Bot, menu: Message, file: DownloadedFile, source_url: 
             height=file.height,
             supports_streaming=True,
             reply_parameters=reply_to,
+            reply_markup=video_markup,
             request_timeout=UPLOAD_TIMEOUT_SECONDS,
         )
 
