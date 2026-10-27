@@ -11,7 +11,8 @@ services:
     volumes:
       - telegram-bot-api-data:/var/lib/telegram-bot-api
     healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "8081"]
+      # 127.0.0.1, not localhost: nc resolves localhost to ::1, but the server listens on IPv4 only.
+      test: ["CMD", "nc", "-z", "127.0.0.1", "8081"]
       interval: 5s
       timeout: 3s
       retries: 20
