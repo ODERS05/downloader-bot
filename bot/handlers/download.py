@@ -246,15 +246,13 @@ async def _send_file(
             )
         return
 
-    async with ChatActionSender.upload_video(chat_id=chat_id, bot=bot):
-        await bot.send_video(
+    # Sent as a file, not as a video: the user gets the original without Telegram's compression.
+    async with ChatActionSender.upload_document(chat_id=chat_id, bot=bot):
+        await bot.send_document(
             chat_id,
-            video=upload,
+            document=upload,
             caption=caption,
-            duration=file.duration,
-            width=file.width,
-            height=file.height,
-            supports_streaming=True,
+            disable_content_type_detection=True,
             reply_parameters=reply_to,
             reply_markup=video_markup,
             request_timeout=UPLOAD_TIMEOUT_SECONDS,

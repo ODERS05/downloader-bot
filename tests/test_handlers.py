@@ -68,7 +68,7 @@ class FakeDownloader:
 
 @pytest.fixture(autouse=True)
 def no_chat_actions(monkeypatch):
-    fake = SimpleNamespace(upload_video=lambda **_: nullcontext(), upload_voice=lambda **_: nullcontext())
+    fake = SimpleNamespace(upload_document=lambda **_: nullcontext(), upload_voice=lambda **_: nullcontext())
     monkeypatch.setattr(download_handlers, "ChatActionSender", fake)
 
 
@@ -180,7 +180,7 @@ async def test_short_clip_is_sent_without_menu(settings, tmp_path):
     assert "720p" in status.edit_text.await_args_list[0].args[0]
     cancel = status.edit_text.await_args_list[0].kwargs["reply_markup"].inline_keyboard[0][0]
     assert CancelCallback.unpack(cancel.callback_data).user_id == 1
-    kwargs = bot.send_video.await_args.kwargs
+    kwargs = bot.send_document.await_args.kwargs
     assert kwargs["reply_parameters"].message_id == message.message_id
     # MP3 is still available, as a button under the video.
     (button,) = kwargs["reply_markup"].inline_keyboard[0]
@@ -210,7 +210,7 @@ async def test_short_clip_download_error_is_shown(settings):
     bot = await send_link(settings, message, downloader, jobs=jobs)
 
     message.reply.return_value.edit_text.assert_awaited_with(TEXTS["en"]["error_blocked"])
-    bot.send_video.assert_not_awaited()
+    bot.send_document.assert_not_awaited()
     assert not jobs.is_busy(1)
 
 
@@ -268,9 +268,10 @@ async def test_choice_downloads_and_sends_video(settings, tmp_path):
     assert "720p" in menu.reply.await_args.args[0]
     assert menu.reply.await_args.kwargs["reply_markup"] is not None  # the Cancel button
     assert downloader.progress[0] is not None
-    kwargs = bot.send_video.await_args.kwargs
-    assert kwargs["video"].filename == "My Clip.mp4"
-    assert (kwargs["width"], kwargs["height"], kwargs["duration"]) == (1280, 720, 12)
+    kwargs = bot.send_document.await_args.kwargs
+    # Sent as a file, so Telegram keeps the original quality.
+    assert kwargs["document"].filename == "My Clip.mp4"
+    assert kwargs["disable_content_type_detection"] is True
     assert kwargs["caption"] == '<a href="https://www.youtube.com/watch?v=abc">My &lt;Clip&gt;</a>'
     menu.reply.return_value.delete.assert_awaited_once()
 
@@ -294,7 +295,7 @@ async def test_choice_sends_audio(settings, tmp_path):
     kwargs = bot.send_audio.await_args.kwargs
     assert kwargs["audio"].filename == "My Clip.mp3"
     assert kwargs["performer"] == "Me"
-    bot.send_video.assert_not_awaited()
+    bot.send_document.assert_not_awaited()
 
 
 async def test_choice_best_label(settings, tmp_path):

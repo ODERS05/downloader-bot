@@ -2,4 +2,5 @@ aiogram==3.31.0
 python-dotenv==1.2.4
 # yt-dlp changes often to keep up with YouTube; the Docker image also updates it on start.
 # [default] pulls in yt-dlp-ejs, needed (with Deno) to solve YouTube's JavaScript challenges.
-yt-dlp[default]>=2026.10.21
+# [curl-cffi] lets yt-dlp look like a real browser; without it TikTok's anti-bot check fails.
+yt-dlp[default,curl-cffi]>=2026.10.21

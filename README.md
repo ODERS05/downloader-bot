@@ -30,8 +30,8 @@ Bot:  📹 Never Gonna Give You Up.mp4
 - **Live progress**: a progress bar while downloading, "waiting in line" when someone else's download is running,
   and a ✖️ Cancel button
 - **English and Russian**: replies in the user's Telegram app language
-- **Plays everywhere**: prefers H.264 + AAC in MP4 and avoids H.265 (TikTok's top quality), so videos play inline
-  on every Telegram client
+- **Original quality**: videos are sent as files, so Telegram doesn't compress them. Prefers H.264 + AAC in MP4
+  and avoids H.265 (TikTok's top quality), so they play on every device
 - **Keeps working**: yt-dlp updates itself each time the bot starts
 - **Docker Compose**: one command to start, restarts by itself after crashes or reboots
 
