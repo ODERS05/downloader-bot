@@ -17,13 +17,9 @@ BEST_CHOICE = "best"
 MP3_BITRATE_KBPS = 192
 MAX_QUALITY_BUTTONS = 8
 
-# Among formats with the same resolution, prefer H.264 video + AAC audio in MP4:
-# it plays inline on every Telegram client (VP9/AV1 doesn't on some older phones).
+# Resolution always wins (TikTok often has its top quality only in H.265). Among formats with
+# the same resolution, prefer H.264 video + AAC audio in MP4: it opens on the most devices.
 FORMAT_SORT = ("res", "vcodec:h264", "ext:mp4:m4a")
-# H.265 doesn't play inline on many Telegram clients, and TikTok serves its top quality in it:
-# skip it whenever the site offers another codec.
-HEVC_CODECS = ("hevc", "hev1", "hvc1", "h265", "bytevc1")
-_NOT_HEVC = f"[vcodec!~='^({'|'.join(HEVC_CODECS)})']"
 
 
 @dataclass(frozen=True)
@@ -73,21 +69,15 @@ def is_video_choice(choice: str) -> bool:
 
 
 def video_format_selector(height: int | None) -> str:
-    """yt-dlp format string: best video up to `height` + best audio, or a single combined file.
-
-    Non-HEVC formats are tried first; HEVC is the fallback when it's all the site has.
-    """
+    """yt-dlp format string: best video up to `height` + best audio, or a single combined file."""
     limit = "" if height is None else f"[height<=?{height}]"
-    return f"bv*{limit}{_NOT_HEVC}+ba/b{limit}{_NOT_HEVC}/bv*{limit}+ba/b{limit}"
+    return f"bv*{limit}+ba/b{limit}"
 
 
 def extract_qualities(formats: list[dict[str, Any]], duration: float | None) -> tuple[Quality, ...]:
     """Group video formats by resolution and estimate each one's download size."""
     audio_size = _best_audio_size(formats, duration)
     videos = [f for f in formats if _has_video(f) and f.get("height")]
-    if not all(_is_hevc(f) for f in videos):
-        # Mirror video_format_selector: these heights would download in another codec anyway.
-        videos = [f for f in videos if not _is_hevc(f)]
     by_height: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for fmt in videos:
         by_height[int(fmt["height"])].append(fmt)
@@ -133,10 +123,6 @@ def _has_audio(fmt: dict[str, Any]) -> bool:
 
 def _is_h264(fmt: dict[str, Any]) -> bool:
     return str(fmt.get("vcodec", "")).startswith(("avc1", "h264"))
-
-
-def _is_hevc(fmt: dict[str, Any]) -> bool:
-    return str(fmt.get("vcodec", "")).lower().startswith(HEVC_CODECS)
 
 
 def _preferred_video_format(group: list[dict[str, Any]]) -> dict[str, Any]:

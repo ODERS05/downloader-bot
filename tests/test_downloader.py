@@ -223,8 +223,7 @@ async def test_downloaded_file_over_limit_raises_too_large(downloader, monkeypat
 def test_format_options_for_best():
     options = _format_options("best")
 
-    assert options["format"].startswith("bv*[vcodec!~=")
-    assert options["format"].endswith("/bv*+ba/b")
+    assert options["format"] == "bv*+ba/b"
     assert options["format_sort"][0] == "res"
 
 

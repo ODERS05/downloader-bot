@@ -98,25 +98,22 @@ def test_estimate_mp3_size():
     assert estimate_mp3_size(0) is None
 
 
-def test_skips_hevc_when_another_codec_is_available():
-    # TikTok: H.264 up to 720p, the 1080p version only in H.265.
-    formats = [video(1280, width=720, filesize=1), video(1920, vcodec="h265", width=1080, filesize=1)]
+def test_offers_hevc_only_resolutions():
+    # TikTok: H.264 up to 576p, the 720p version only in H.265.
+    formats = [video(1024, width=576, filesize=1), video(1280, vcodec="h265", width=720, filesize=1)]
 
-    assert [q.label for q in extract_qualities(formats, duration=10)] == ["720p"]
+    assert [q.label for q in extract_qualities(formats, duration=10)] == ["720p", "576p"]
 
 
-def test_keeps_hevc_when_it_is_the_only_codec():
-    formats = [video(1920, vcodec="hvc1.1.6.L120.90", width=1080, filesize=1)]
+def test_prefers_h264_at_the_same_resolution():
+    formats = [video(1024, vcodec="h265", width=576, filesize=2), video(1024, width=576, filesize=1)]
 
-    assert [q.label for q in extract_qualities(formats, duration=10)] == ["1080p"]
+    assert extract_qualities(formats, duration=10)[0].estimated_size == 1
 
 
 def test_video_format_selector():
-    no_hevc = "[vcodec!~='^(hevc|hev1|hvc1|h265|bytevc1)']"
-    assert video_format_selector(None) == f"bv*{no_hevc}+ba/b{no_hevc}/bv*+ba/b"
-    assert video_format_selector(720) == (
-        f"bv*[height<=?720]{no_hevc}+ba/b[height<=?720]{no_hevc}/bv*[height<=?720]+ba/b[height<=?720]"
-    )
+    assert video_format_selector(None) == "bv*+ba/b"
+    assert video_format_selector(720) == "bv*[height<=?720]+ba/b[height<=?720]"
 
 
 def test_is_video_choice():
