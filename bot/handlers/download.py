@@ -88,7 +88,7 @@ async def handle_choice(
         quality = _choice_label(info, callback_data.choice, lang)
         status = await menu.reply(t(lang, "downloading", quality=quality))
         try:
-            async with downloader.download(info.url, callback_data.choice) as file:
+            async with downloader.download(info.url, callback_data.choice, info.extracted) as file:
                 await status.edit_text(t(lang, "uploading"))
                 await _send_file(bot, menu, file, info.url)
         except MediaError as err:

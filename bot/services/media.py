@@ -6,7 +6,7 @@ Nothing in this module touches the network, so it is easy to unit test.
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -37,6 +37,8 @@ class MediaInfo:
     uploader: str | None
     qualities: tuple[Quality, ...]  # best first
     audio_size: int | None  # estimated MP3 size in bytes
+    # yt-dlp's lookup result, reused by the download so YouTube isn't asked twice.
+    extracted: dict[str, Any] | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)

@@ -40,10 +40,12 @@ class FakeDownloader:
         self._file = file
         self._download_error = download_error
         self.downloads: list[tuple[str, str]] = []
+        self.extracted: list[dict | None] = []
 
     @asynccontextmanager
-    async def download(self, url, choice):
+    async def download(self, url, choice, extracted=None):
         self.downloads.append((url, choice))
+        self.extracted.append(extracted)
         if self._download_error:
             raise self._download_error
         yield self._file
@@ -194,6 +196,16 @@ async def test_choice_downloads_and_sends_video(settings, tmp_path):
     assert (kwargs["width"], kwargs["height"], kwargs["duration"]) == (1280, 720, 12)
     assert kwargs["caption"] == '<a href="https://www.youtube.com/watch?v=abc">My &lt;Clip&gt;</a>'
     menu.reply.return_value.delete.assert_awaited_once()
+
+
+async def test_choice_passes_saved_lookup_to_download(settings, tmp_path):
+    downloader = FakeDownloader(file=make_file(tmp_path))
+    store = RequestStore()
+    token = store.put(make_info(extracted={"title": "saved"}))
+
+    await press(settings, "720", downloader, store=store, token=token)
+
+    assert downloader.extracted == [{"title": "saved"}]
 
 
 async def test_choice_sends_audio(settings, tmp_path):

@@ -21,7 +21,7 @@ def fake_ytdlp(monkeypatch, info: dict, files: dict[str, int] | None = None):
     """Replace the real yt-dlp call; optionally 'download' files of given sizes."""
     calls = []
 
-    def run(options, url, *, download):
+    def run(options, url, *, download, saved_info=None):
         calls.append(options)
         if download and files:
             home = Path(options["paths"]["home"])
@@ -97,7 +97,7 @@ async def test_download_ignores_cookies_copy_when_finding_output(tmp_path, monke
     instance = Downloader(tmp_path / "downloads", MAX_SIZE * 10, 1, cookies_file=cookies)
     instance.prepare()
 
-    def run(options, url, *, download):
+    def run(options, url, *, download, saved_info=None):
         assert Path(options["cookiefile"]).exists()
         (Path(options["paths"]["home"]) / "abc.mp4").write_bytes(b"v" * 100)
         return {"title": "t"}
@@ -220,7 +220,7 @@ def test_format_options_for_best():
     assert options["format_sort"][0] == "res"
 
 
-def fake_youtube_dl_class(extract_info):
+def fake_youtube_dl_class(extract_info, processed=None):
     class FakeYoutubeDL:
         def __init__(self, options):
             pass
@@ -233,6 +233,12 @@ def fake_youtube_dl_class(extract_info):
 
         def extract_info(self, url, download):
             return extract_info()
+
+        def process_ie_result(self, info, download):
+            if processed is not None:
+                processed.append(info)
+            info["touched"] = True
+            return info
 
     return FakeYoutubeDL
 
@@ -260,3 +266,89 @@ def test_run_ytdlp_returns_info(monkeypatch):
     monkeypatch.setattr(downloader_module, "YoutubeDL", fake_youtube_dl_class(lambda: {"title": "ok"}))
 
     assert _run_ytdlp({}, "https://youtu.be/abc", download=False) == {"title": "ok"}
+
+
+def test_run_ytdlp_reuses_saved_info_without_changing_it(monkeypatch):
+    processed = []
+    monkeypatch.setattr(
+        downloader_module, "YoutubeDL", fake_youtube_dl_class(lambda: pytest.fail("looked up again"), processed)
+    )
+    saved = {"title": "ok", "formats": [{"format_id": "1"}]}
+
+    result = _run_ytdlp({}, "https://youtu.be/abc", download=True, saved_info=saved)
+
+    assert result["title"] == "ok"
+    assert processed and processed[0] is not saved
+    assert "touched" not in saved
+
+
+async def test_probe_keeps_extracted_info_without_heavy_fields(downloader, monkeypatch):
+    fake_ytdlp(
+        monkeypatch,
+        {
+            "title": "Hello",
+            "formats": [{"format_id": "18", "url": "https://x"}],
+            "automatic_captions": {"en": [{"url": "https://captions"}]},
+            "subtitles": {"en": []},
+            "__private": "internal",
+        },
+    )
+
+    info = await downloader.probe("https://youtu.be/abc")
+
+    assert info.extracted["formats"] == [{"format_id": "18", "url": "https://x"}]
+    for key in ("automatic_captions", "subtitles", "__private"):
+        assert key not in info.extracted
+
+
+def test_youtube_hls_formats_are_skipped(downloader, tmp_path):
+    options = downloader._base_options(tmp_path)
+
+    assert options["extractor_args"] == {"youtube": {"skip": ["hls"]}}
+
+
+def record_ytdlp(monkeypatch, results):
+    """Fake yt-dlp that returns/raises `results` in order and records whether saved info was used."""
+    used_saved_info = []
+
+    def run(options, url, *, download, saved_info=None):
+        used_saved_info.append(saved_info is not None)
+        result = results[len(used_saved_info) - 1]
+        if isinstance(result, Exception):
+            (Path(options["paths"]["home"]) / "stale.mp4.part").write_bytes(b"x")
+            raise result
+        (Path(options["paths"]["home"]) / "abc.mp4").write_bytes(b"v" * 10)
+        return result
+
+    monkeypatch.setattr(downloader_module, "_run_ytdlp", run)
+    return used_saved_info
+
+
+async def test_download_reuses_probe_result(downloader, monkeypatch):
+    used_saved_info = record_ytdlp(monkeypatch, [{"title": "Hello"}])
+
+    async with downloader.download("https://youtu.be/abc", "720", extracted={"title": "Hello"}) as file:
+        assert file.title == "Hello"
+
+    assert used_saved_info == [True]
+
+
+async def test_download_looks_up_again_when_saved_info_fails(downloader, monkeypatch):
+    used_saved_info = record_ytdlp(monkeypatch, [MediaError("error_generic"), {"title": "Fresh"}])
+
+    async with downloader.download("https://youtu.be/abc", "720", extracted={"title": "Old"}) as file:
+        assert file.title == "Fresh"
+        assert sorted(p.name for p in file.path.parent.iterdir()) == ["abc.mp4"]
+
+    assert used_saved_info == [True, False]
+
+
+async def test_download_too_large_is_not_retried(downloader, monkeypatch):
+    used_saved_info = record_ytdlp(monkeypatch, [MediaError("too_large", size=5)])
+
+    with pytest.raises(MediaError) as err:
+        async with downloader.download("https://youtu.be/abc", "720", extracted={"title": "x"}):
+            pass
+
+    assert err.value.code == "too_large"
+    assert used_saved_info == [True]

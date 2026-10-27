@@ -6,6 +6,7 @@ yt-dlp is blocking, so every call runs in a worker thread to keep the bot respon
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import shutil
 import tempfile
@@ -37,6 +38,8 @@ SOCKET_TIMEOUT_SECONDS = 30
 RETRIES = 3
 JOB_DIR_PREFIX = "job-"
 COOKIES_COPY_NAME = "cookies.txt"
+# Big parts of the lookup result the download never needs; dropped to keep saved lookups small.
+UNUSED_INFO_KEYS = ("automatic_captions", "subtitles", "thumbnails", "heatmap", "description")
 
 # Substrings of yt-dlp error messages, checked in order, mapped to i18n keys.
 _ERROR_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -116,14 +119,17 @@ class Downloader:
             return await asyncio.to_thread(self._probe_sync, url, workdir)
 
     @asynccontextmanager
-    async def download(self, url: str, choice: str) -> AsyncIterator[DownloadedFile]:
+    async def download(
+        self, url: str, choice: str, extracted: dict[str, Any] | None = None
+    ) -> AsyncIterator[DownloadedFile]:
         """Download `url` as `choice` ("mp3", "best" or a height like "720").
 
+        `extracted` is the saved lookup from `probe`; reusing it skips a second lookup.
         The file is deleted when the `async with` block ends.
         """
         with self._job_dir() as workdir:
             async with self._semaphore:
-                result = await asyncio.to_thread(self._download_sync, url, choice, workdir)
+                result = await asyncio.to_thread(self._download_with_fallback, url, choice, workdir, extracted)
             yield result
 
     @contextmanager
@@ -147,6 +153,9 @@ class Downloader:
             "retries": RETRIES,
             "fragment_retries": RETRIES,
             "logger": _YtDlpLogger(),
+            # YouTube's HLS list costs an extra request, and its streams download in many small
+            # fragments; the plain HTTPS formats cover the same qualities.
+            "extractor_args": {"youtube": {"skip": ["hls"]}},
         }
         if self._cookies_file:
             # yt-dlp rewrites the cookie file when it finishes. Each job gets its own copy, so
@@ -173,9 +182,25 @@ class Downloader:
             uploader=info.get("uploader") or info.get("channel"),
             qualities=extract_qualities(info.get("formats") or [], duration),
             audio_size=estimate_mp3_size(duration),
+            extracted=_reusable_info(info),
         )
 
-    def _download_sync(self, url: str, choice: str, workdir: Path) -> DownloadedFile:
+    def _download_with_fallback(
+        self, url: str, choice: str, workdir: Path, extracted: dict[str, Any] | None
+    ) -> DownloadedFile:
+        if extracted is None:
+            return self._download_sync(url, choice, workdir, None)
+        try:
+            return self._download_sync(url, choice, workdir, extracted)
+        except MediaError as err:
+            if err.code == "too_large":
+                raise
+            # The saved links may have expired; a fresh lookup gets new ones.
+            logger.info("Saved lookup for %s failed (%s), looking it up again", url, err.code)
+        _empty_dir(workdir)
+        return self._download_sync(url, choice, workdir, None)
+
+    def _download_sync(self, url: str, choice: str, workdir: Path, extracted: dict[str, Any] | None) -> DownloadedFile:
         options = {
             **self._base_options(workdir),
             "paths": {"home": str(workdir), "temp": str(workdir)},
@@ -183,7 +208,7 @@ class Downloader:
             "max_filesize": self._max_file_size,
             **_format_options(choice),
         }
-        info = _run_ytdlp(options, url, download=True)
+        info = _run_ytdlp(options, url, download=True, saved_info=extracted)
 
         path = _find_output_file(workdir)
         if path is None:
@@ -226,15 +251,35 @@ def _format_options(choice: str) -> dict[str, Any]:
     }
 
 
-def _run_ytdlp(options: dict[str, Any], url: str, *, download: bool) -> dict[str, Any]:
+def _run_ytdlp(
+    options: dict[str, Any], url: str, *, download: bool, saved_info: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Look up `url`, or with `saved_info` reuse an earlier lookup (like yt-dlp's --load-info-json)."""
     try:
         with YoutubeDL(options) as ydl:
-            info = ydl.extract_info(url, download=download)
+            if saved_info is None:
+                info = ydl.extract_info(url, download=download)
+            else:
+                # yt-dlp fills in the dict as it works; keep the saved one untouched for retries.
+                info = ydl.process_ie_result(copy.deepcopy(saved_info), download=download)
     except DownloadError as exc:
         raise MediaError(classify_error(str(exc))) from exc
     if not info:
         raise MediaError("error_unsupported")
     return info
+
+
+def _reusable_info(info: dict[str, Any]) -> dict[str, Any]:
+    clean = YoutubeDL.sanitize_info(info, remove_private_keys=True)
+    return {key: value for key, value in clean.items() if key not in UNUSED_INFO_KEYS}
+
+
+def _empty_dir(workdir: Path) -> None:
+    for path in workdir.iterdir():
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            path.unlink(missing_ok=True)
 
 
 def classify_error(message: str) -> str:
