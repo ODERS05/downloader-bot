@@ -1,5 +1,5 @@
 [project]
-name = "youtube-telegram-bot"
+name = "downloader-bot"
 version = "1.0.0"
 description = "Telegram bot that downloads videos from YouTube and 1000+ other sites in the quality you choose."
 requires-python = ">=3.12"
